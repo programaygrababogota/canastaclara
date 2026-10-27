@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CanastaClara — Pruebas de API producción</title>
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: "JetBrains Mono", ui-monospace, monospace; background: #050810; color: #e2e8f0; padding: 24px; }
+  h1 { font-size: 20px; color: #22d3ee; margin-bottom: 4px; }
+  .muted { color: #64748b; font-size: 12px; margin-bottom: 16px; }
+  code { color: #fbbf24; }
+  button { background: #22d3ee; color: #050810; border: 0; padding: 10px 20px; font-weight: 700; border-radius: 8px; cursor: pointer; font-family: inherit; }
+  button:disabled { opacity: .5; cursor: wait; }
+  #summary { margin: 16px 0; font-size: 14px; }
+  .test { background: #0b1220; border: 1px solid #1e293b; border-radius: 8px; padding: 10px 14px; margin-bottom: 8px; font-size: 13px; display: flex; gap: 10px; align-items: baseline; }
+  .badge { font-weight: 700; min-width: 64px; text-align: center; border-radius: 4px; padding: 2px 6px; font-size: 11px; }
+  .pass .badge { background: #052e16; color: #4ade80; }
+  .fail .badge { background: #450a0a; color: #f87171; }
+  .ms { color: #64748b; font-size: 11px; margin-left: auto; white-space: nowrap; }
+  .detail { width: 100%; color: #94a3b8; font-size: 12px; word-break: break-all; }
+</style>
+</head>
+<body>
+<h1>🧪 CanastaClara — Pruebas API producción</h1>
+<p class="muted">Proxy: <code>/api/*</code> · OFF v3/v2 + Socrata · UA: <code>canastaclara/1.0 (juan.gutierreztor@cun.edu.co)</code> · Modo: <code id="mode">auto</code></p>
+<button id="run">▶ Ejecutar pruebas</button>
+<div id="summary"></div>
+<ol id="results" style="list-style:none;padding:0"></ol>
+
+<script src="js/data.js"></script>
+<script src="js/api.js"></script>
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+$("#mode").textContent = API_CONFIG.mode + (API_CONFIG.proxyBase ? " → " + API_CONFIG.proxyBase : " (mismo origen)");
+
+function j(url) { return fetch(url).then(async r => ({ status: r.status, data: await r.json().catch(() => null) })); }
+function assert(cond, msg) { if (!cond) throw new Error(msg || "aserción falló"); }
+
+const TESTS = [
+  ["Proxy OFF: producto conocido (3017620422003)", async () => {
+    const { status, data } = await j("/api/product?code=3017620422003");
+    assert(status === 200, "HTTP " + status);
+    assert(data && data.product && data.product.product_name, "sin product_name");
+    return data.product.product_name;
+  }],
+  ["Proxy OFF: producto inexistente → status 0", async () => {
+    const { data } = await j("/api/product?code=0000000000000");
+    assert(data && data.status === 0, "esperaba status:0, llegó " + JSON.stringify(data && data.status));
+    return "status:0 manejado";
+  }],
+  ["Proxy OFF: código inválido → HTTP 400", async () => {
+    const { status, data } = await j("/api/product?code=abc");
+    assert(status === 400 && data.error.code === "bad_code", "esperaba 400 bad_code, llegó " + status);
+    return "bad_code";
+  }],
+  ["Proxy OFF: búsqueda 'yogur' Colombia", async () => {
+    const { status, data } = await j("/api/search?q=" + encodeURIComponent("yogur") + "&colombiaOnly=1&pageSize=12");
+    assert(status === 200, "HTTP " + status);
+    assert(Array.isArray(data.products), "products no es array");
+    return data.products.length + " productos (total " + (data.count || 0) + ")";
+  }],
+  ["Proxy OFF: búsqueda respeta pageSize", async () => {
+    const { data } = await j("/api/search?q=pan&pageSize=5");
+    assert(Array.isArray(data.products) && data.products.length <= 5, "pageSize no respetado");
+    return "pageSize 5 ok";
+  }],
+  ["Proxy OFF: categoría en:chocolates", async () => {
+    const { data } = await j("/api/category?tag=en:chocolates&pageSize=12");
+    assert(data && Array.isArray(data.products), "products no es array");
+    return data.products.length + " productos";
+  }],
+  ["Proxy INVima: establecimientos $limit=2", async () => {
+    const { status, data } = await j("/api/invima?ds=uhs6-qp53&%24limit=2");
+    assert(status === 200 && Array.isArray(data), "respuesta inválida");
+    assert(data.length <= 2, "limit no respetado");
+    return data.length + " filas";
+  }],
+  ["Proxy INVima: WHERE por razón social ALQUERIA", async () => {
+    const { status, data } = await j("/api/invima?ds=uhs6-qp53&%24where=" + encodeURIComponent("upper(razon_social) like '%ALQUERIA%'") + "&%24limit=3");
+    assert(status === 200 && Array.isArray(data), "respuesta inválida");
+    return data.length + " filas";
+  }],
+  ["Proxy INVima: dataset inválido → HTTP 400", async () => {
+    const { status } = await j("/api/invima?ds=x!&%24limit=1");
+    assert(status === 400, "esperaba 400, llegó " + status);
+    return "bad_ds";
+  }],
+  ["Frontend OFF.search(): shape correcto", async () => {
+    const r = await OFF.search("gaseosa", { colombiaOnly: true, pageSize: 10 });
+    assert(Array.isArray(r.products), "products no es array");
+    assert(typeof r.count === "number", "count no es número");
+    return r.products.length + " productos";
+  }],
+  ["Frontend OFF.byCategory(): shape correcto", async () => {
+    const r = await OFF.byCategory("en:galletas", { pageSize: 10 });
+    assert(Array.isArray(r.products), "products no es array");
+    return r.products.length + " productos";
+  }],
+  ["Frontend OFF.product(): nombre presente", async () => {
+    const p = await OFF.product("3017620422003");
+    assert(p && p.product_name, "sin product_name");
+    return p.product_name;
+  }],
+  ["Frontend OFF.product(): inexistente → null", async () => {
+    const p = await OFF.product("0000000000000");
+    assert(p === null, "esperaba null, llegó " + typeof p);
+    return "null";
+  }],
+  ["Frontend INVIMA.establecimientos('ALQUERIA')", async () => {
+    const rows = await INVIMA.establecimientos("ALQUERIA", 5);
+    assert(Array.isArray(rows), "no es array");
+    return rows.length + " filas";
+  }],
+  ["Frontend INVIMA.conteoRegistros()", async () => {
+    const rows = await INVIMA.conteoRegistros("ALQUERIA");
+    assert(Array.isArray(rows), "no es array");
+    return JSON.stringify(rows.slice(0, 3));
+  }],
+  ["Informativo: OFF directo desde navegador (CORS)", async () => {
+    const r = await fetch("https://world.openfoodfacts.org/api/v2/product/3017620422003.json?fields=code");
+    return r.ok ? "disponible (modo direct viable)" : "HTTP " + r.status;
+  }],
+];
+
+$("#run").addEventListener("click", async () => {
+  const btn = $("#run"), ol = $("#results");
+  btn.disabled = true; ol.innerHTML = ""; $("#summary").textContent = "Ejecutando…";
+  let pass = 0, fail = 0;
+  for (const [name, fn] of TESTS) {
+    const li = document.createElement("li");
+    li.className = "test"; li.innerHTML = "<span class='badge'>…</span><span></span><span class='ms'></span>";
+    ol.appendChild(li);
+    const t0 = performance.now();
+    try {
+      const detail = await fn();
+      const ms = Math.round(performance.now() - t0);
+      li.classList.add("pass");
+      li.children[0].textContent = "PASS";
+      li.children[1].textContent = name;
+      li.children[2].textContent = ms + " ms";
+      const d = document.createElement("div"); d.className = "detail"; d.textContent = String(detail).slice(0, 300);
+      li.appendChild(d);
+      pass++;
+    } catch (e) {
+      const ms = Math.round(performance.now() - t0);
+      li.classList.add("fail");
+      li.children[0].textContent = "FAIL";
+      li.children[1].textContent = name;
+      li.children[2].textContent = ms + " ms";
+      const d = document.createElement("div"); d.className = "detail"; d.textContent = String(e && e.message || e);
+      li.appendChild(d);
+      fail++;
+    }
+  }
+  $("#summary").innerHTML = "<b style='color:#4ade80'>" + pass + " PASS</b> · <b style='color:#f87171'>" + fail + " FAIL</b>";
+  btn.disabled = false;
+});
+</script>
+</body>
+</html>
